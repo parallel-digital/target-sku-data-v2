@@ -46,11 +46,16 @@ class TargetScraper:
     def get_target_api_data(self, tcin, max_retries=3):
         """Try to fetch data from Target's internal APIs"""
         
-        # Target's product API endpoints (discovered through reverse engineering)
+        # Target's Redsky API endpoints - these are the correct ones based on research
         api_endpoints = [
-            f"https://redsky.target.com/redsky_aggregations/v1/redsky/case_study_v1?key=9f36aeafbe60771e321a7cc95a78140772ab3e96&tcin={tcin}&is_bot=false&store_id=3991&pricing_store_id=3991&has_financing_options=true&visitor_id=&channel=WEB&page=%2Fp%2FA-{tcin}",
-            f"https://redsky.target.com/v3/pdp/tcin/{tcin}?excludes=taxonomy,price,promotion,bulk_ship,rating_and_review_reviews,rating_and_review_statistics,question_answer_statistics&key=9f36aeafbe60771e321a7cc95a78140772ab3e96&visitor_id=&channel=WEB&page=%2Fp%2FA-{tcin}",
-            f"https://redsky.target.com/v2/pdp/tcin/{tcin}?excludes=taxonomy,price,promotion,bulk_ship,rating_and_review_reviews,rating_and_review_statistics,question_answer_statistics&key=9f36aeafbe60771e321a7cc95a78140772ab3e96"
+            # Main product data endpoint
+            f"https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1?key=ff457966e64d5e877fdbad070f276d18ecec4a01&tcin={tcin}&store_id=3991&pricing_store_id=3991&has_pricing_store_id=true&scheduled_delivery_store_id=3991&has_scheduled_delivery_store_id=true&is_bot=false&channel=WEB&page=%2Fp%2FA-{tcin}",
+            
+            # Alternative product endpoint
+            f"https://redsky.target.com/v3/pdp/tcin/{tcin}?key=ff457966e64d5e877fdbad070f276d18ecec4a01&channel=WEB&page=%2Fp%2FA-{tcin}&store_id=3991&pricing_store_id=3991&has_pricing_store_id=true",
+            
+            # Backup endpoint
+            f"https://redsky.target.com/v2/pdp/tcin/{tcin}?key=ff457966e64d5e877fdbad070f276d18ecec4a01&channel=WEB"
         ]
         
         for attempt in range(max_retries):
@@ -72,6 +77,7 @@ class TargetScraper:
                     if response.status_code == 200:
                         try:
                             data = response.json()
+                            
                             result = self._parse_api_response(tcin, data)
                             if result and result['Title'] != 'N/A':
                                 logger.info(f"Successfully extracted data from API for TCIN {tcin}")
@@ -166,106 +172,161 @@ class TargetScraper:
         return self._create_invalid_tcin_record(tcin, "Max retries exceeded")
     
     def _parse_api_response(self, tcin, data):
-        """Parse Target API JSON response"""
+        """Parse Target API JSON response using correct Redsky structure"""
         result = self._create_base_record(tcin)
         
         try:
-            # Navigate through Target's API structure
+            # Target Redsky API structure: data -> product
+            product = None
+            
+            # Handle different API response structures
             if 'data' in data and 'product' in data['data']:
                 product = data['data']['product']
             elif 'product' in data:
                 product = data['product']
             else:
-                # Try to find product data in any nested structure
-                product = None
-                for key, value in data.items():
-                    if isinstance(value, dict) and ('title' in value or 'item' in value):
-                        product = value
-                        break
+                logger.warning(f"Unexpected API structure for TCIN {tcin}")
+                return None
             
             if not product:
                 return None
             
-            # Extract title
-            title_fields = ['title', 'display_name', 'product_description']
-            for field in title_fields:
-                if field in product and product[field]:
-                    if isinstance(product[field], dict):
-                        result['Title'] = product[field].get('title', product[field].get('name', ''))
-                    else:
-                        result['Title'] = str(product[field])
-                    break
-            
-            # Extract brand
-            if 'brand' in product:
-                brand = product['brand']
-                if isinstance(brand, dict):
-                    result['Brand'] = brand.get('name', brand.get('display_name', ''))
-                else:
-                    result['Brand'] = str(brand)
-            
-            # Extract item information (alternative structure)
-            if 'item' in product:
+            # Extract title from item.product_description
+            if 'item' in product and product['item']:
                 item = product['item']
+                
                 if 'product_description' in item:
                     desc = item['product_description']
-                    if isinstance(desc, dict):
-                        result['Title'] = desc.get('title', result['Title'])
-                        if 'bullet_descriptions' in desc:
-                            bullets = desc['bullet_descriptions']
-                            if bullets and len(bullets) > 0:
-                                # Sometimes brand is in bullet points
-                                first_bullet = bullets[0]
-                                if isinstance(first_bullet, str) and len(first_bullet) < 50:
-                                    result['Brand'] = first_bullet
+                    if 'title' in desc:
+                        result['Title'] = desc['title']
+                
+                # Extract brand from product_classification
+                if 'product_classification' in item:
+                    classification = item['product_classification']
+                    if 'product_type' in classification:
+                        product_type = classification['product_type']
+                        if 'name' in product_type:
+                            result['Brand'] = product_type['name']
+                
+                # Try to get brand from product_vendors
+                if 'product_vendors' in item and len(item['product_vendors']) > 0:
+                    vendor = item['product_vendors'][0]
+                    if 'vendor_name' in vendor:
+                        result['Brand'] = vendor['vendor_name']
             
-            # Extract pricing
-            if 'price' in product:
+            # Extract pricing from price
+            if 'price' in product and product['price']:
                 price_data = product['price']
-                if isinstance(price_data, dict):
-                    # Look for current and regular prices
-                    current_price = price_data.get('current_retail', price_data.get('current', ''))
-                    regular_price = price_data.get('regular_retail', price_data.get('list_price', current_price))
-                    
-                    if current_price:
-                        result['Sale_Price'] = f"${current_price}" if not str(current_price).startswith('$') else str(current_price)
-                    if regular_price:
-                        result['Regular_Price'] = f"${regular_price}" if not str(regular_price).startswith('$') else str(regular_price)
+                
+                # Current retail price (sale price)
+                if 'current_retail' in price_data and price_data['current_retail']:
+                    result['Sale_Price'] = f"${price_data['current_retail']}"
+                
+                # Regular retail price
+                if 'regular_retail' in price_data and price_data['regular_retail']:
+                    result['Regular_Price'] = f"${price_data['regular_retail']}"
+                elif 'current_retail' in price_data:
+                    # If no separate regular price, use current as both
+                    result['Regular_Price'] = result['Sale_Price']
+                
+                # Handle price ranges (some products have min/max)
+                if 'current_retail_min' in price_data and 'current_retail_max' in price_data:
+                    min_price = price_data['current_retail_min']
+                    max_price = price_data['current_retail_max']
+                    if min_price == max_price:
+                        result['Sale_Price'] = f"${min_price}"
+                    else:
+                        result['Sale_Price'] = f"${min_price} - ${max_price}"
             
-            # Extract reviews and ratings
-            if 'ratings_and_reviews' in product:
+            # Extract reviews and ratings from ratings_and_reviews
+            if 'ratings_and_reviews' in product and product['ratings_and_reviews']:
                 reviews = product['ratings_and_reviews']
-                if isinstance(reviews, dict):
-                    if 'statistics' in reviews:
-                        stats = reviews['statistics']
-                        result['Number_of_Reviews'] = stats.get('review_count', stats.get('total_count', 'N/A'))
-                        result['Star_Rating'] = stats.get('rating', stats.get('average_overall_rating', 'N/A'))
+                
+                if 'statistics' in reviews:
+                    stats = reviews['statistics']
+                    
+                    # Review count
+                    if 'rating' in stats and 'count' in stats['rating']:
+                        result['Number_of_Reviews'] = str(stats['rating']['count'])
+                    elif 'review_count' in stats:
+                        result['Number_of_Reviews'] = str(stats['review_count'])
+                    
+                    # Star rating
+                    if 'rating' in stats and 'average' in stats['rating']:
+                        result['Star_Rating'] = str(stats['rating']['average'])
+                    elif 'average_overall_rating' in stats:
+                        result['Star_Rating'] = str(stats['average_overall_rating'])
             
-            # Extract images
+            # Extract images from enrichment.images
             if 'enrichment' in product and 'images' in product['enrichment']:
                 images = product['enrichment']['images']
-                if isinstance(images, list):
-                    for i, img in enumerate(images[:3]):
-                        if isinstance(img, dict):
-                            base_url = img.get('base_url', '')
-                            if base_url:
-                                result[f'Image_{i+1}_URL'] = base_url
-            elif 'images' in product:
-                images = product['images']
-                if isinstance(images, list):
-                    for i, img in enumerate(images[:3]):
-                        if isinstance(img, dict):
-                            url = img.get('base_url', img.get('url', ''))
-                            if url:
-                                result[f'Image_{i+1}_URL'] = url
-                        elif isinstance(img, str):
-                            result[f'Image_{i+1}_URL'] = img
+                
+                if 'primary_image_url' in images:
+                    result['Image_1_URL'] = images['primary_image_url']
+                
+                if 'alternate_image_urls' in images and images['alternate_image_urls']:
+                    alt_images = images['alternate_image_urls']
+                    for i, img_url in enumerate(alt_images[:2], 2):  # Start from Image_2
+                        if img_url and i <= 3:
+                            result[f'Image_{i}_URL'] = img_url
             
+            # Alternative image extraction from item.enrichment
+            elif 'item' in product and 'enrichment' in product['item']:
+                enrichment = product['item']['enrichment']
+                if 'images' in enrichment:
+                    images = enrichment['images']
+                    
+                    # Primary image
+                    if 'primary_image_url' in images:
+                        result['Image_1_URL'] = images['primary_image_url']
+                    
+                    # Alternative images
+                    if 'alternate_image_urls' in images and images['alternate_image_urls']:
+                        for i, img_url in enumerate(images['alternate_image_urls'][:2], 2):
+                            if img_url:
+                                result[f'Image_{i}_URL'] = img_url
+            
+            # Fallback: look for any images in the product data
+            if result['Image_1_URL'] == 'N/A':
+                self._extract_fallback_images(product, result)
+            
+            logger.info(f"Successfully extracted data for TCIN {tcin}: {result['Title'][:50]}...")
             return result if result['Title'] != 'N/A' else None
             
         except Exception as e:
             logger.error(f"Error parsing API response for TCIN {tcin}: {str(e)}")
+            # Log the structure for debugging
+            logger.debug(f"API response structure keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
             return None
+    
+    def _extract_fallback_images(self, product, result):
+        """Fallback method to extract images from various locations in product data"""
+        try:
+            # Search recursively for image URLs
+            def find_images_recursive(obj, images_found):
+                if len(images_found) >= 3:
+                    return images_found
+                
+                if isinstance(obj, dict):
+                    for key, value in obj.items():
+                        if 'image' in key.lower() and isinstance(value, str) and 'http' in value:
+                            if value not in images_found:
+                                images_found.append(value)
+                        elif isinstance(value, (dict, list)):
+                            images_found = find_images_recursive(value, images_found)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        images_found = find_images_recursive(item, images_found)
+                
+                return images_found
+            
+            images = find_images_recursive(product, [])
+            
+            for i, img_url in enumerate(images[:3], 1):
+                result[f'Image_{i}_URL'] = img_url
+                
+        except Exception as e:
+            logger.error(f"Error in fallback image extraction: {str(e)}")
     
     def _parse_html_response(self, tcin, html_content):
         """Parse HTML page content"""
@@ -487,7 +548,7 @@ def main():
         layout="wide"
     )
     
-    st.title("🎯 Target TCIN Product Data Scraper v3.1")
+    st.title("🎯 Target TCIN Product Data Scraper v4")
     st.markdown("Extract product data from Target.com using TCINs (Advanced HTTP Scraping)")
     
     # Success notice
@@ -589,7 +650,6 @@ def main():
     # Scraping section
     if tcins and st.button("🚀 Scrape Products", type="primary"):
         scraper = TargetScraper()
-        scraper.debug_mode = debug_mode  # Pass debug mode to scraper
         
         try:
             st.info("🔄 Starting advanced HTTP scraping...")
@@ -597,7 +657,6 @@ def main():
             # Progress tracking
             progress_bar = st.progress(0)
             status_text = st.empty()
-            results_container = st.container()
             results = []
             
             # Show live results
@@ -605,10 +664,7 @@ def main():
             
             # Process each TCIN
             for i, tcin in enumerate(tcins):
-                if debug_mode and i == 0:
-                    status_text.text(f"🔍 DEBUG MODE: Processing TCIN {tcin} with detailed logging...")
-                else:
-                    status_text.text(f"Processing TCIN {tcin} ({i+1}/{len(tcins)}) - Trying API first...")
+                status_text.text(f"Processing TCIN {tcin} ({i+1}/{len(tcins)}) - Trying API first...")
                 
                 result = scraper.get_target_api_data(tcin)
                 results.append(result)
