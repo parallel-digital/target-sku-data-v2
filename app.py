@@ -487,7 +487,7 @@ def main():
         layout="wide"
     )
     
-    st.title("🎯 Target TCIN Product Data Scraper v3")
+    st.title("🎯 Target TCIN Product Data Scraper v3.1")
     st.markdown("Extract product data from Target.com using TCINs (Advanced HTTP Scraping)")
     
     # Success notice
