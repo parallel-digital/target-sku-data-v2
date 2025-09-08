@@ -589,6 +589,7 @@ def main():
     # Scraping section
     if tcins and st.button("🚀 Scrape Products", type="primary"):
         scraper = TargetScraper()
+        scraper.debug_mode = debug_mode  # Pass debug mode to scraper
         
         try:
             st.info("🔄 Starting advanced HTTP scraping...")
@@ -604,7 +605,10 @@ def main():
             
             # Process each TCIN
             for i, tcin in enumerate(tcins):
-                status_text.text(f"Processing TCIN {tcin} ({i+1}/{len(tcins)}) - Trying API first...")
+                if debug_mode and i == 0:
+                    status_text.text(f"🔍 DEBUG MODE: Processing TCIN {tcin} with detailed logging...")
+                else:
+                    status_text.text(f"Processing TCIN {tcin} ({i+1}/{len(tcins)}) - Trying API first...")
                 
                 result = scraper.get_target_api_data(tcin)
                 results.append(result)
